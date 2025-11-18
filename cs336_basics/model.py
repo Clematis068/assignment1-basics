@@ -34,18 +34,18 @@ class Embedding(nn.Module):
         return self.weight[token_ids]
     
 class rmsnorm(nn.Module):
-    def __init__(self, d_model: int, eps: float = 1e-5, device: torch.device | None =None, dtype: torch.dtype | None =None, **kwargs):
+    def __init__(self, d_model: int, eps: float = 1e-5, device: torch.device | None =None, dtype: torch.dtype | None =None):
         super().__init__()
-        self.eps = eps # train and upd
+        self.eps = eps if eps is not None else 1e-5
         self.weight = nn.Parameter(torch.ones(d_model, device=device, dtype=dtype))
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        in_type = x.dtype
+        in_dtype = x.dtype
         x = x.to(torch.float32)
 
         rms = torch.sqrt(reduce(x ** 2, "... d -> ... 1", "mean") + self.eps)
         res = x * self.weight / rms
-        return res.to(in_type)
+        return res.to(in_dtype)
 
 def silu_activation(x: torch.Tensor) -> torch.Tensor:
     return x * torch.sigmoid(x)
@@ -75,20 +75,20 @@ class SiLU(torch.nn.Module):
         return self.w2(silu)
     
 class rope(nn.Module):
-    def __init__(self, theta: float, d_k: int, max_seq_len: int, device: torch.device | None = None):
+    def __init__(self, theta: float, d_k: int, max_seq_len: int, device: torch.device | None = None, dtype: torch.dtype | None = None):
         super().__init__()
         self.d_k = d_k
         self.seq_len = max_seq_len
         positions = torch.arange(max_seq_len, device=device).unsqueeze(1) # 行变列 (seqlen, 1)
         assert positions.shape == (max_seq_len, 1)
-        freqs = torch.arange(0, d_k, 2, device=device) / d_k
+        freqs = torch.arange(0, d_k, 2, device=device).float() / d_k
         inv_freq = 1.0 / (theta ** freqs) # (d/ 2, )
         assert inv_freq.shape == (d_k // 2,)
         # 我们要求得到一个矩阵而不是数，所以就是element wise
         angles = positions * inv_freq #l, d/ 2
         assert angles.shape == (max_seq_len, d_k // 2)
-        self.register_buffer("sin", angles.sin(), persistent=False)
-        self.register_buffer("cos", angles.cos(), persistent=False)
+        self.register_buffer("sin", angles.sin().to(dtype), persistent=False)
+        self.register_buffer("cos", angles.cos().to(dtype), persistent=False)
         
 
     def forward(self, x: torch.Tensor, token_positions: torch.Tensor) -> torch.Tensor:
@@ -118,7 +118,7 @@ def scaled_dot_product_attention(Q: torch.Tensor, K: torch.Tensor, V: torch.tens
     attention_scores = einsum(Q, K, "... seq_q d, ... seq_k d -> ... seq_q seq_k")
     attention_scores = attention_scores / math.sqrt(d_k)
     attention_scores = torch.where(mask, attention_scores, float("-inf"))
-    attention_w = softmax(attention_scores, dim=-1) # q关注哪些k合理
+    attention_w = softmax(attention_scores, dim=-1) # q关注哪些k 合理
     output = einsum(attention_w, V, "... seq_q seq_k, ... seq_k d -> ... seq_q d")
     return output
 
@@ -149,12 +149,13 @@ class CausalMultiHeadSelfAttention(nn.Module):
 
         if Rope is not None:
             if token_positions is None:
-                token_positions = torch.arange(seq_len)
+                token_positions = torch.arange(seq_len, device=x.device)
             q = Rope(q, token_positions)
             k = Rope(k, token_positions)
 
         # casual性质
-        mask = torch.tril(torch.ones(seq_len, seq_len, device=x.device, dtype=torch.bool), diagonal = 0)
+        mask = torch.tril(torch.ones(seq_len, seq_len, device=x.device, dtype=torch.bool), diagonal = 0) #注意要负无穷而不是0
+        # mask = ~torch.triu(torch.ones((seq_len, seq_len), device=x.device, dtype=torch.bool), diagonal=1)
         y = scaled_dot_product_attention(q, k, v, mask)
         y = rearrange(y, "b h s d -> b s (h d)")
         return self.output_proj(y)
@@ -170,18 +171,59 @@ class Block(nn.Module):
                  **kwargs, ):
         super().__init__()
         self.Rope = Rope
-        self.ln1 = rmsnorm(d_model, device, dtype)
-        self.ln2 = rmsnorm(d_model, device, dtype)
+        self.ln1 = rmsnorm(d_model, device=device, dtype=dtype)
+        self.ln2 = rmsnorm(d_model, device=device, dtype=dtype)
         self.attn = CausalMultiHeadSelfAttention(d_model, num_heads, device, dtype)
-        ffn_type = kwargs.get("ffn_type", "SWiGLU")
+        ffn_type = kwargs.get("ffn_type", "swiglu")
 
         if ffn_type == "silu":
             self.ffn = SiLU(d_model, d_ff, device, dtype)
-        else:
+        elif ffn_type == "swiglu":
             self.ffn = SWiGLU(d_model, d_ff, device, dtype)
+        else:
+            raise ValueError(f"Unsupported ffn_type: {ffn_type}")
         
-    def forward(self, x):
-        x = x + self.attn(self.ln1(x), self.Rope)
+    def forward(self, x: torch.Tensor):
+        x = x + self.attn(self.ln1(x), Rope = self.Rope)
         x = x + self.ffn(self.ln2(x))
+
+        return x
+    
+class Transformer(nn.Module):
+    def __init__(self,
+                 vocab_size: int,
+                 d_model: int,
+                 num_heads: int,
+                 d_ff: int,
+                 context_length: int,
+                 num_layers: int,
+                 rope_theta: float = 10000.0,
+                 device: torch.device | None = None,
+                 dtype: torch.dtype | None = None,
+                 **kwargs):
+        super().__init__()
+        self.context_length = context_length
+        self.token_embeddings = Embedding(vocab_size, d_model, device, dtype, **kwargs)
+
+        assert d_model % num_heads == 0
+        d_head = d_model // num_heads
+        Rope = rope(rope_theta, d_head, context_length, device, dtype)
+
+        self.layers = nn.ModuleList([Block(d_model, num_heads, d_ff, Rope, device, dtype, **kwargs) for _ in range(num_layers)])
+        self.ln_final = rmsnorm(d_model, device=device, dtype=dtype)
+        self.lm_head = Linear(d_model, vocab_size, device=device, dtype=dtype)
+        if kwargs.get("weight_tying"):
+            self.lm_head.weight = self.token_embeddings.weight
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        b, s = x.shape
+        assert s <= self.context_length
+        x = self.token_embeddings(x)
+
+        for layer in self.layers:
+            x = layer(x)
+
+        x = self.ln_final(x)
+        x = self.lm_head(x)
 
         return x

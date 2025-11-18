@@ -14,6 +14,34 @@ from cs336_basics.tokenizer import Tokenizer
 from cs336_basics.model import Linear
 from cs336_basics.model import Embedding
 from cs336_basics.model import rmsnorm, SWiGLU, rope
+
+def _merge_weights(weights: dict[str, Tensor]) -> dict[str, Tensor]:
+    if "attn.q_proj.weight" in weights:
+        weights["attn.wqkv.weight"] = torch.cat([weights["attn.q_proj.weight"], weights["attn.k_proj.weight"], weights["attn.v_proj.weight"]], dim=0)
+        
+        del weights["attn.k_proj.weight"]
+        del weights["attn.q_proj.weight"]
+        del weights["attn.v_proj.weight"]
+
+    layer_prefixes = set()
+    for key in list(weights.keys()):
+        if key.startswith("layers.") and key.endswith(".attn.q_proj.weight"):
+            layer_prefix = key.rsplit(".attn.q_proj.weight", 1)[0]
+            layer_prefixes.add(layer_prefix)
+
+    for prefix in layer_prefixes:
+        q_key = f"{prefix}.attn.q_proj.weight"
+        k_key = f"{prefix}.attn.k_proj.weight"
+        v_key = f"{prefix}.attn.v_proj.weight"
+        if q_key in weights and k_key in weights and v_key in weights:
+            weights[f"{prefix}.attn.wqkv.weight"] = torch.cat([weights[q_key], weights[k_key], weights[v_key]], dim = 0) #按行拼起来(1, (D))
+
+            del weights[q_key]
+            del weights[k_key]
+            del weights[v_key]
+
+    return weights
+
 def run_linear(
     d_in: int,
     d_out: int,
@@ -299,8 +327,11 @@ def run_transformer_block(
     """
     Rope = rope(theta, d_model // num_heads, max_seq_len)
     layer = Block(d_model, num_heads, d_ff, Rope)
+    layer.load_state_dict(_merge_weights(weights))
 
+    return layer(in_features)
 
+from cs336_basics.model import Transformer
 def run_transformer_lm(
     vocab_size: int,
     context_length: int,
@@ -380,7 +411,9 @@ def run_transformer_lm(
         Float[Tensor, "batch_size sequence_length vocab_size"]: Tensor with the predicted unnormalized
         next-word distribution for each token.
     """
-    raise NotImplementedError
+    model = Transformer(vocab_size, d_model, num_heads, d_ff, context_length, num_layers, rope_theta)
+    model.load_state_dict(_merge_weights(weights))
+    return model(in_indices)
 
 
 def run_rmsnorm(
