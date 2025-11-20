@@ -83,4 +83,7 @@ class AdamW(torch.optim.Optimizer):
                     p.data.add_(p.data, alpha = -lr * wd) # 不加下划线不会改p而是会生成一个新tensor
 
                 state["t"] = t + 1
-        return loss 
+        return loss
+
+# FLOPs计算backward由于存在对W和x的计算,一般都是forward的两倍
+# AdamW参数量是param的两倍，因为存在上一时刻和该时刻的计算
