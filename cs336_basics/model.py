@@ -60,7 +60,7 @@ class SWiGLU(nn.Module):
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         a1 = self.w1(x)
         silu = silu_activation(a1)
-        return self.w2(silu * self.w3(x))
+        return self.w2(silu * self.w3(x)) # actually w3 called V, 2 /3 of dff 
     
 class SiLU(torch.nn.Module):
     def __init__(self, d_model: int, d_ff: int, device: torch.device | None = None, dtype: torch.dtype | None = None):
