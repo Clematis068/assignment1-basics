@@ -82,7 +82,7 @@ def pre_tokenize_chunk(chunk: str, special_pattern : re.Pattern | None) -> dict[
         for match in PAT.finditer(sub_chunk):
             match_bytes = tuple(bytes([b]) for b in match.group().encode("utf-8"))
             freqs[match_bytes] = freqs.get(match_bytes, 0) + 1
-
+    # 分块的match分别编码乘bytes，加到freqs内
     return freqs
 
 def merge_freq_dicts(dict1: dict[tuple[bytes], int], dict2: dict[tuple[bytes], int]) -> dict[tuple[bytes], int]:
@@ -93,18 +93,20 @@ def merge_freq_dicts(dict1: dict[tuple[bytes], int], dict2: dict[tuple[bytes], i
     return res
 
 def pre_tokenize(input_path: str, special_tokens: list[str]) -> dict[tuple[bytes], int]:
+
     num_processes = mp.cpu_count()
     pool = mp.Pool(num_processes)
+
     chunk_freqs = []
     special_pattern = re.compile("|".join(re.escape(tk) for tk in special_tokens)) if special_tokens else None
 
     with open(input_path, "rb") as f:
         boundaries = find_chunk_boundaries(f, num_processes, b"<|endoftext|>")
-        for start, end in zip(boundaries[:-1], boundaries[1:]): # 50， 100， 150 qu (50, 100)
+        for start, end in zip(boundaries[:-1], boundaries[1:]): # 50， 100， 150 取 (50, 100)，间隔一个
             f.seek(start)
             chunk_bytes = f.read(end - start)
-            chunk_str = chunk_bytes.decode("utf-8")
-            chunk_freqs.append(pool.apply_async(pre_tokenize_chunk, (chunk_str, special_pattern)))
+            chunk_str = chunk_bytes.decode("utf-8") # 编码
+            chunk_freqs.append(pool.apply_async(pre_tokenize_chunk, (chunk_str, special_pattern))) # 同步
 
     pool.close()
     pool.join() # 主进程阻塞，这块不太懂
@@ -118,7 +120,7 @@ def pre_tokenize(input_path: str, special_tokens: list[str]) -> dict[tuple[bytes
     ...
     ]
     """
-    combined_freqs = reduce(merge_freq_dicts, freqs_dicts, {}) # 把每个区块的东西合并[x, y] [c, d] (x + c) : y + d
+    combined_freqs = reduce(merge_freq_dicts, freqs_dicts, {}) # 把每个区块的东西合并[x, y] [c, d] (x + c) : (y + d)，迭代所有
     return combined_freqs
 """
     {
@@ -139,7 +141,7 @@ def get_pair_freqs(freqs : dict[tuple[bytes], int]) -> tuple[dict[tuple[bytes, b
             pair_freqs[pair] += freq
             pairs_to_keys[pair].add(words)
 
-    return pair_freqs, pairs_to_keys
+    return pair_freqs, pairs_to_keys # 第二个是所有的字节字母
 
 def build_new_words(old : tuple[bytes], pair: tuple[bytes, bytes]) -> tuple[bytes]:
     # return new words list like ("s", "b") to ("sb")
@@ -245,9 +247,9 @@ def train_bpe(input_path: str,
             freq = -neg_freq
             # 处理可能的新值和一定有的旧值
             if pair_freqs.get(top_pair, 0) == freq:
-                pair = top_pair
+                pair = top_pair # 找到这个最好的如果词频内和找到的信息一致，不用更新
                 break
-            if top_pair in pair_freqs and pair_freqs[top_pair] > 0:
+            if top_pair in pair_freqs and pair_freqs[top_pair] > 0: # 如果不一致，说明数据过期了要更新
                 heapq.heappush(pair_selected, (-pair_freqs[top_pair], ReverseLexOrderPair(top_pair), top_pair))
 
         else:
@@ -261,7 +263,7 @@ def train_bpe(input_path: str,
 
         # 影响的东西增量更新
         changed_pairs = merge(freqs, pair_freqs, pair_to_keys, pair)
-        for cp in changed_pairs:
+        for cp in changed_pairs: # 改变的东西一定是新值要更新
             if cp in pair_freqs and pair_freqs[cp] > 0:#更新后的东西放到堆内继续合并
                 heapq.heappush(pair_selected, (-pair_freqs[cp], ReverseLexOrderPair(cp), cp))
 
