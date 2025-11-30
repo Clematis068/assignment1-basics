@@ -160,7 +160,7 @@ def build_new_words(old : tuple[bytes], pair: tuple[bytes, bytes]) -> tuple[byte
 def merge(freqs: dict[tuple[bytes], int], 
           pair_freqs: dict[tuple[bytes, bytes], int],
           pair_to_keys: dict[tuple[bytes, bytes], set[tuple[bytes]]],
-          pair: tuple[bytes, bytes]
+          pair: tuple[bytes, bytes] #这个从堆里边获得
 ) -> set[tuple[bytes, bytes]]:
     changed_pair = set()
     keys_to_modify = pair_to_keys[pair].copy()
@@ -177,10 +177,10 @@ def merge(freqs: dict[tuple[bytes], int],
             if pair_freqs[l, r] <= 0:
                 del pair_freqs[l, r]
             pair_to_keys[l, r].discard(old_key)
-
+        # new_key放到ptk里边
         for i in range(len(new_key) - 1):
             l, r = new_key[i], new_key[i + 1]
-            pair_freqs[l, r] += old_freq
+            pair_freqs[l, r] += old_freq # 频率共用
             changed_pair.add((l, r))
             pair_to_keys[l, r].add(new_key)
 
